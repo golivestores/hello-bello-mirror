@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+server.js
+build.js
+/tmp/
+*.log
+.claude/

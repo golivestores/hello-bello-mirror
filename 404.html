@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Redirecting... | Himax</title>
+<script>
+(function(){
+  var path = window.location.pathname.replace(/\/+$/, '') || '/';
+  var dest = '/about/'; // default: brand page
+  if (path.indexOf('/products') === 0) {
+    dest = '/products/diapers/';
+  } else if (path.indexOf('/collections') === 0) {
+    dest = '/collections/personal-care/';
+  } else if (path === '/') {
+    dest = '/';
+  }
+  window.location.replace(dest);
+})();
+</script>
+</head>
+<body>
+<p>Redirecting...</p>
+</body>
+</html>
