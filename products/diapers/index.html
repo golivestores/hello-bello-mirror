@@ -2,83 +2,104 @@
 <script>
 (function(){
   var ORIGIN = 'https://www.hellobello.com';
+  var MY_ORIGIN = location.origin;
 
-  // --- 0. Intercept dynamic chunk/resource loading for /_next/ paths ---
-  // Patch createElement to rewrite <script>.src and <link>.href pointing to /_next/
-  var origCreateElement = document.createElement.bind(document);
-  document.createElement = function(tag) {
-    var el = origCreateElement(tag);
-    if (tag.toLowerCase() === 'script') {
-      var srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
-      if (srcDesc && srcDesc.set) {
-        var origSrcSet = srcDesc.set;
-        Object.defineProperty(el, 'src', {
-          set: function(v) {
-            if (typeof v === 'string' && v.startsWith('/_next/')) v = ORIGIN + v;
-            return origSrcSet.call(this, v);
-          },
-          get: srcDesc.get, configurable: true, enumerable: true
-        });
-      }
-    }
-    if (tag.toLowerCase() === 'link') {
-      var hrefDesc = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href');
-      if (hrefDesc && hrefDesc.set) {
-        var origHrefSet = hrefDesc.set;
-        Object.defineProperty(el, 'href', {
-          set: function(v) {
-            if (typeof v === 'string' && v.startsWith('/_next/')) v = ORIGIN + v;
-            return origHrefSet.call(this, v);
-          },
-          get: hrefDesc.get, configurable: true, enumerable: true
-        });
-      }
-    }
-    return el;
-  };
+  // ============================================================
+  // A. GLOBAL PROTOTYPE PATCHES — redirect /_next/ to origin
+  //    Catches webpack dynamic chunk loading, CSS loading, etc.
+  // ============================================================
 
-  // Patch fetch to redirect /_next/ requests to origin
-  var origFetch = window.fetch;
-  window.fetch = function(url, opts) {
-    if (typeof url === 'string' && url.startsWith('/_next/')) url = ORIGIN + url;
-    return origFetch.call(this, url, opts);
-  };
+  // Helper: rewrite /_next/ URLs (relative or resolved to our domain) to origin
+  function proxyNextUrl(url) {
+    if (typeof url !== 'string') return url;
+    if (url.startsWith('/_next/')) return ORIGIN + url;
+    if (url.startsWith(MY_ORIGIN + '/_next/')) return url.replace(MY_ORIGIN, ORIGIN);
+    return url;
+  }
 
-  // Patch XMLHttpRequest open
-  var origXHROpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    if (typeof url === 'string' && url.startsWith('/_next/')) url = ORIGIN + url;
-    return origXHROpen.apply(this, [method, url].concat(Array.prototype.slice.call(arguments, 2)));
-  };
-
-  // --- 1. srcSet comma fix ---
-  var desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'srcset');
-  if (desc && desc.set) {
-    var origSet = desc.set;
-    Object.defineProperty(HTMLImageElement.prototype, 'srcset', {
-      set: function(val) {
-        if (val && val.indexOf('hellobellocdn.com/cdn-cgi/image/') !== -1) {
-          val = val.replace(/(https:\/\/hellobellocdn\.com\/cdn-cgi\/image\/[^\s]+)/g, function(url) {
-            return url.replace(/,/g, '%2C');
-          });
-        }
-        return origSet.call(this, val);
-      },
-      get: desc.get, configurable: true
+  // Patch HTMLScriptElement.prototype.src (catches ALL script.src = ...)
+  var sSrc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+  if (sSrc && sSrc.set) {
+    var origSS = sSrc.set;
+    Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+      set: function(v) { return origSS.call(this, proxyNextUrl(v)); },
+      get: sSrc.get, configurable: true, enumerable: true
     });
   }
+
+  // Patch HTMLLinkElement.prototype.href (catches ALL link.href = ...)
+  var lHref = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href');
+  if (lHref && lHref.set) {
+    var origLH = lHref.set;
+    Object.defineProperty(HTMLLinkElement.prototype, 'href', {
+      set: function(v) { return origLH.call(this, proxyNextUrl(v)); },
+      get: lHref.get, configurable: true, enumerable: true
+    });
+  }
+
+  // Patch setAttribute to also catch script.setAttribute('src', ...) patterns
   var origSetAttr = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function(name, val) {
-    if ((name === 'srcset' || name === 'srcSet') && typeof val === 'string' &&
-        val.indexOf('hellobellocdn.com/cdn-cgi/image/') !== -1) {
-      val = val.replace(/(https:\/\/hellobellocdn\.com\/cdn-cgi\/image\/[^\s]+)/g, function(url) {
-        return url.replace(/,/g, '%2C');
-      });
+    if (typeof val === 'string') {
+      if ((name === 'src' || name === 'href') && (this.tagName === 'SCRIPT' || this.tagName === 'LINK')) {
+        val = proxyNextUrl(val);
+      }
+      // srcSet comma fix
+      if ((name === 'srcset' || name === 'srcSet') && val.indexOf('hellobellocdn.com/cdn-cgi/image/') !== -1) {
+        val = val.replace(/(https:\/\/hellobellocdn\.com\/cdn-cgi\/image\/[^\s]+)/g, function(u) {
+          return u.replace(/,/g, '%2C');
+        });
+      }
     }
     return origSetAttr.call(this, name, val);
   };
 
-  // --- 2. Link rewriting ---
+  // ============================================================
+  // B. FETCH / XHR — redirect /_next/, silently drop RSC requests
+  // ============================================================
+
+  var origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    if (typeof url === 'string') {
+      // Redirect /_next/ asset requests to origin
+      url = proxyNextUrl(url);
+      // Block RSC navigation/prefetch requests (they 404 on static hosting)
+      if (/[?&]_rsc=/.test(url) && !url.startsWith('http')) {
+        return Promise.resolve(new Response('', { status: 204 }));
+      }
+    }
+    return origFetch.call(this, url, opts);
+  };
+
+  var origXHROpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    if (typeof url === 'string') url = proxyNextUrl(url);
+    return origXHROpen.apply(this, [method, url].concat(Array.prototype.slice.call(arguments, 2)));
+  };
+
+  // ============================================================
+  // C. srcSet comma fix (prototype-level)
+  // ============================================================
+  var imgSrcset = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'srcset');
+  if (imgSrcset && imgSrcset.set) {
+    var origIS = imgSrcset.set;
+    Object.defineProperty(HTMLImageElement.prototype, 'srcset', {
+      set: function(val) {
+        if (val && val.indexOf('hellobellocdn.com/cdn-cgi/image/') !== -1) {
+          val = val.replace(/(https:\/\/hellobellocdn\.com\/cdn-cgi\/image\/[^\s]+)/g, function(u) {
+            return u.replace(/,/g, '%2C');
+          });
+        }
+        return origIS.call(this, val);
+      },
+      get: imgSrcset.get, configurable: true
+    });
+  }
+
+  // ============================================================
+  // D. LINK REWRITING — force full-page navigation for all internal links
+  //    (kills Next.js SPA routing that triggers RSC fetches)
+  // ============================================================
   function rewriteHref(href) {
     if (!href || href.startsWith('http') || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return href;
     var clean = href.split('?')[0].split('#')[0].replace(/\/+$/, '') || '/';
@@ -88,16 +109,32 @@
     if (clean === '/about') return '/about/';
     return '/about/';
   }
+
+  // Capture-phase click handler — fires BEFORE React/Next.js handlers
   document.addEventListener('click', function(e) {
     var link = e.target.closest('a');
     if (!link) return;
     var href = link.getAttribute('href');
     if (!href || href.startsWith('http') || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
-    var newHref = rewriteHref(href);
-    if (newHref !== href) { e.preventDefault(); window.location.href = newHref; }
+    // Force full-page navigation for ALL internal links
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    window.location.href = rewriteHref(href);
   }, true);
 
-  // --- 3. Brand replacement ---
+  // Also intercept programmatic pushState (Next.js router)
+  var origPush = history.pushState;
+  history.pushState = function(state, title, url) {
+    if (url && typeof url === 'string' && url.startsWith('/') && !url.startsWith('/_next/')) {
+      window.location.href = rewriteHref(url);
+      return;
+    }
+    return origPush.apply(this, arguments);
+  };
+
+  // ============================================================
+  // E. BRAND REPLACEMENT + MutationObserver
+  // ============================================================
   function replaceBrand() {
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
     var node;
@@ -117,7 +154,6 @@
   } else { setTimeout(replaceBrand, 500); }
   window.addEventListener('load', function() { setTimeout(replaceBrand, 1000); });
 
-  // --- 4. MutationObserver for React re-renders ---
   new MutationObserver(function(muts) {
     muts.forEach(function(m) {
       m.addedNodes.forEach(function(n) {
